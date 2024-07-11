@@ -1,0 +1,312 @@
+---
+title: "CoReNat_Distance_from_baseline"
+author: "Rachael Holmes"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+Load in libraries and set up data
+
+```{r}
+
+library(tidyverse)
+library(vegan)
+library(baselines)
+
+allpoll_list <- rio::import_list("cores_dates.xlsx")
+
+allpoll_nested <- tibble(Site=names(allpoll_list), polldata=allpoll_list)
+
+gp_lookup <- read_csv("Groups.csv")
+
+fun_long_tidy <- function(x) {
+  
+  x_long <- x %>% 
+    pivot_longer(cols=-c("Depth","Age_BP"), 
+                 names_to="VarName", 
+                 values_to="Count")%>%
+    replace(is.na(.), 0) %>%
+    group_by(Depth) %>%
+  filter(sum(Count) > 100) %>% # removes samples with counts under 100
+  ungroup() %>%
+    group_by(VarName) %>%
+    filter(sum(Count) != 0)%>%
+    ungroup()%>%
+    group_by(Depth) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>% # calculate %
+  ungroup()
+}
+
+# can use nested or in long format
+
+poll_long <- allpoll_nested %>% 
+  mutate(polldata, polldata = map(polldata, ~ fun_long_tidy(.x))) %>%
+  unnest(cols = polldata)
+
+fun_wide_perc <- function (x) {
+  
+x_perc <- x  %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Percent, values_fill=0)
+}
+
+head(poll_long)
+
+# just need LKRE and MH  for this
+
+LKRE_perc <- poll_long %>% # wide for rioja
+  filter(Site == "LKRE") %>%
+  left_join(gp_lookup) %>%
+  filter(habitat2 == "Mangrove")%>%
+  fun_wide_perc()
+
+LKRE_pol <- LKRE_perc %>%
+  select(-Age_BP)
+
+
+MH_perc <- poll_long %>% # wide for rioja
+  filter(Site == "MH") %>%
+  left_join(gp_lookup) %>%
+  filter(habitat2 == "Mangrove")%>%
+  fun_wide_perc()
+
+MH_pol <- MH_perc %>%
+  select(-Age_BP)
+
+```
+
+Following approach of Burg et al. 2023.
+
+```{r}
+
+# rel abundance and log transform
+tLKRE_pol <- decostand(LKRE_pol, "log") 
+
+set.seed(99) # get repeatable NMDs output
+
+okMeta2 <- metaMDS(tLKRE_pol, distance = "jaccard", k = 2, try = 200, try.max = 700, autotransform = TRUE)
+
+okMeta <- metaMDS(tLKRE_pol, distance = "jaccard", k = 2, try = 200, try.max = 700, autotransform = TRUE, previous.best = okMeta2)
+
+# make meta data file
+
+LK_meta <- LKRE_perc %>%
+  select(Depth, Age_BP)%>%
+  mutate(Zone = case_when(Age_BP == -69 ~ "post-restoration",
+  #Age_BP < 70 ~ 'zone3',
+  #Age_BP < 600 ~ 'zone2',
+  Age_BP < 850 ~ 'pre-deforestation')) 
+
+# calculate the pre-disturbance baseline
+
+distsOut <- calcEllipseDists(metadf = LK_meta, ord = okMeta, group = "Zone", reflev = "pre-deforestation")
+
+# distsOut returns a list - what are the names
+names(distsOut)
+
+metaScores <- distsOut[["distDF"]] %>%
+  mutate(Zone = as.factor(Zone))
+
+head(metaScores, 2)
+
+baselineEllipse <- distsOut[["baseline_polygon_DF"]]
+
+# get centroid for pre-deforestation ellipse
+
+centroidCoord <- metaScores %>%
+  filter(Zone == "pre-deforestation") %>%
+  slice(1) %>%
+  dplyr::select(centroid1, centroid2)
+
+ptSize <- 2.5
+
+nmdsPlot <- ggplot() +
+  coord_equal() +
+  geom_hline(colour = "grey", linetype = "dashed",yintercept = 0) +
+  geom_vline(colour = "grey", linetype = "dashed", xintercept = 0) +
+  geom_polygon(data = baselineEllipse,
+               aes(x = NMDS1, y = NMDS2,fill = group), alpha = 0.5,
+               show.legend = FALSE) +
+  geom_point(data = metaScores, 
+             aes(x = NMDS1, y = NMDS2,fill = Zone), size = ptSize,
+             colour = "black", shape = 21, stroke = 0.8) +
+  geom_text(data = centroidCoord,
+            aes(x = centroid1, y = centroid2), 
+            label = "X", colour = "white", size = 12) +
+  scale_fill_brewer("Zone", palette = "YlGnBu", direction = -1, limits = c("pre-deforestation", "post-restoration"),
+                    labels = c("Pre-deforestation", "Post-restoration")) +
+  guides(fill = guide_legend(title.position = "top",
+                             title.hjust = 0.5,nrow = 2, byrow = TRUE))+
+  theme_bw() +
+  theme(legend.position = "bottom",
+        panel.grid = element_blank(),
+        plot.tag.position = "topleft")
+
+
+nmdsPlot
+
+excludingBaseline <- metaScores[metaScores$Zone != "pre-deforestation", ]
+
+lmModEllipse <- lm(data = excludingBaseline, formula = distEllipse ~ Age_BP * Zone, na.action = "na.fail")
+
+library(MuMIn)
+
+modComp <- dredge(lmModEllipse)
+
+modComp
+
+# preferred model
+simpleLM <- lm(data = excludingBaseline,formula = distEllipse ~ Age_BP)
+
+simpleLM
+
+plot(lmModEllipse, which = 1)
+
+acf(resid(simpleLM), main = "")
+
+lmSummary <- data.frame(Model = "lm", summary(simpleLM)$coefficient) %>%
+  rownames_to_column("Parameter") %>% 
+  rename(p.value = Pr...t.., Std.Error = Std..Error)
+
+knitr::kable(bind_rows(lmSummary) %>%
+               mutate(p.value = sprintf(p.value, fmt = "%.3f")),
+             digits = 3, caption = "LM model summaries")
+
+newYears <- data.frame(Age_BP = seq(from = min(excludingBaseline$Age_BP),
+to = max(excludingBaseline$Age_BP),by = 1))
+
+modelPreds <- predict(simpleLM, newdata = newYears, 
+                      interval = "confidence",level = 0.95, se.fit = TRUE)
+
+newYears <- data.frame(newYears, modelPreds[[1]])
+
+ggplot(newYears, aes(x = Age_BP, y = fit)) +
+geom_point(data = excludingBaseline,
+aes(y = distEllipse),
+shape = 1) +
+geom_ribbon(aes(ymin = lwr, ymax = upr),
+fill = adjustcolor("grey50", 0.4),
+linetype = "dashed") +
+geom_line() +
+theme_classic() +
+labs(x = "Year",
+y = "Distance from baseline in ordination space")
+
+```
+
+Run for MH mangroves
+
+```{r}
+
+# rel abundance and log transform
+tMH_pol <- decostand(MH_pol, "log") 
+
+set.seed(388) # get repeatable NMDs output
+
+okMeta2 <- metaMDS(tMH_pol, distance = "jaccard", k = 2, try = 200, try.max = 700, autotransform = TRUE)
+
+okMeta <- metaMDS(tMH_pol, distance = "jaccard", k = 2, try = 200, try.max = 700, autotransform = TRUE, previous.best = okMeta2)
+
+# make meta data file
+
+MH_meta <- MH_perc %>%
+  select(Depth, Age_BP)%>%
+  mutate(Zone = case_when(Age_BP < 281 ~ 'zone4',
+  Age_BP < 1000 ~ 'zone3',
+  Age_BP < 9000 ~ 'zone1')) 
+
+# calculate the pre-disturbance baseline
+
+distsOut <- calcEllipseDists(metadf = MH_meta, ord = okMeta, group = "Zone", reflev = "zone1")
+
+# distsOut returns a list - what are the names
+names(distsOut)
+
+metaScores <- distsOut[["distDF"]] %>%
+  mutate(Zone = as.factor(Zone))
+
+head(metaScores, 2)
+
+baselineEllipse <- distsOut[["baseline_polygon_DF"]]
+
+# get centroid for pre-deforestation ellipse
+
+centroidCoord <- metaScores %>%
+  filter(Zone == "zone1") %>%
+  slice(1) %>%
+  dplyr::select(centroid1, centroid2)
+
+ptSize <- 2.5
+
+nmdsPlot <- ggplot() +
+  coord_equal() +
+  geom_hline(colour = "grey", linetype = "dashed",yintercept = 0) +
+  geom_vline(colour = "grey", linetype = "dashed", xintercept = 0) +
+  geom_polygon(data = baselineEllipse,
+               aes(x = NMDS1, y = NMDS2,fill = group), alpha = 0.5,
+               show.legend = FALSE) +
+  geom_point(data = metaScores, 
+             aes(x = NMDS1, y = NMDS2,fill = Zone), size = ptSize,
+             colour = "black", shape = 21, stroke = 0.8) +
+  geom_text(data = centroidCoord,
+            aes(x = centroid1, y = centroid2), 
+            label = "X", colour = "white", size = 12) +
+  scale_fill_brewer("Zone", palette = "YlGnBu", direction = -1, limits = c("zone1", "zone3", "zone4"),
+                    labels = c("Holocene baseline", "Disturbed", "Recoverying")) +
+  guides(fill = guide_legend(title.position = "top",
+                             title.hjust = 0.5,nrow = 2, byrow = TRUE))+
+  theme_bw() +
+  theme(legend.position = "bottom",
+        panel.grid = element_blank(),
+        plot.tag.position = "topleft")
+
+
+nmdsPlot
+
+excludingBaseline <- metaScores[metaScores$Zone != "zone1", ]
+
+lmModEllipse <- lm(data = excludingBaseline, formula = distEllipse ~ Age_BP * Zone, na.action = "na.fail")
+
+modComp <- dredge(lmModEllipse)
+
+modComp
+
+# preferred model
+simpleLM <- lm(data = excludingBaseline,formula = distEllipse ~ Age_BP)
+
+simpleLM
+
+plot(lmModEllipse, which = 1)
+
+acf(resid(simpleLM), main = "")
+
+lmSummary <- data.frame(Model = "lm", summary(simpleLM)$coefficient) %>%
+  rownames_to_column("Parameter") %>% 
+  rename(p.value = Pr...t.., Std.Error = Std..Error)
+
+knitr::kable(bind_rows(lmSummary) %>%
+               mutate(p.value = sprintf(p.value, fmt = "%.3f")),
+             digits = 3, caption = "LM model summaries")
+
+
+newYears <- data.frame(Age_BP = seq(from = min(excludingBaseline$Age_BP),
+to = max(excludingBaseline$Age_BP),by = 1))
+
+modelPreds <- predict(simpleLM, newdata = newYears, 
+                      interval = "confidence",level = 0.95, se.fit = TRUE)
+
+newYears <- data.frame(newYears, modelPreds[[1]])
+
+ggplot(newYears, aes(x = Age_BP, y = fit)) +
+geom_point(data = excludingBaseline,
+aes(y = distEllipse),
+shape = 1) +
+geom_ribbon(aes(ymin = lwr, ymax = upr),
+fill = adjustcolor("grey50", 0.4),
+linetype = "dashed") +
+geom_line() +
+theme_classic() +
+labs(x = "Year",
+y = "Distance from baseline in ordination space")
+
+```

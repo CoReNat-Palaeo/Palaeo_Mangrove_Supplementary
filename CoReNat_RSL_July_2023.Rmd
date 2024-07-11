@@ -1,0 +1,291 @@
+---
+title: "CoReNat_RSL_3_July_2023"
+author: "Rachael Holmes"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+Estimating Holocene relative sea-level for Southeast Asia using the SEAMIS dataset
+
+
+### First load libraries
+
+```{r, warning = FALSE}
+
+library(tidyverse)
+
+```
+
+### Load data
+
+```{r}
+sea <- read.csv("SEAMIS.csv") %>% # seamis datset
+  filter(Reject == 0) %>% # removes rejected data
+  filter(RSL_m != "n/a")%>% # remove NAs
+  mutate(Age_cal_BP = as.numeric(Age_cal_BP))%>%
+  filter(Age_cal_BP < 9000) %>% # remove beyond CoReNat data
+  # remove data not within focus region
+  filter(Sub_region != "Chao Phraya delta") %>% 
+  filter(Sub_region != "Song Hong Red River delta") %>% 
+  filter(Sub_region!= "Song Hong Red River delta lagoon")%>%
+  # kept mekong river delta but not valley as less applicable
+  filter(Sub_region!= "Mekong valley")%>% 
+  filter(Sub_region!= "Pulu Pandan")%>%
+  filter(Region_code != "7") %>%
+  # some data with no radiocarbon age still included - remove
+  filter(Notes != "No radiocarbon age provided")%>%
+  #convert vars to numeric
+  mutate(RSL_m = as.numeric(RSL_m))%>%
+  mutate(RSL_2sig = as.numeric(RSL_2sig_pos_m))%>%
+  mutate(Age_2sig_pos = as.numeric(Age_2sig_pos_cal))%>%
+  mutate(Age_2sig_neg = as.numeric(Age_2sig_neg_cal))%>%
+  mutate(Region_code = as.factor(Region_code))%>%
+  arrange(-Age_cal_BP)%>%
+  select(Unique_sample_ID, Reference, Region_code, Sub_region, Latitude, Longitude, Age_cal_BP,Age_2sig_pos, Age_2sig_neg, RSL_m, RSL_2sig)
+
+```
+
+### Plot all data
+
+```{r}
+
+sea %>%
+  ggplot(aes(x = Age_cal_BP, y = RSL_m, colour = Sub_region)) +
+  geom_point()+
+  geom_errorbar(aes(ymin=RSL_m-RSL_2sig, 
+                    ymax=RSL_m+RSL_2sig),
+                width=.2)+
+  geom_errorbar(aes(xmin= Age_2sig_neg, 
+                    xmax= Age_2sig_pos),
+                width=.2)+
+  theme_classic()
+
+```
+
+### Extract predicted RSL from GAM for plotting and using in analysis
+
+```{r, warning = FALSE}
+
+library(mgcv)
+library(tidygam)
+library(gratia)
+
+# first fit GAM with K = n (obs - 1)
+
+mod_gam <- gam(RSL_m ~ s(Age_cal_BP, k = 112),# long term
+                data = sea, method = "REML")# Restricted Maximum Likelihood Estimation to determine wiggliness 
+
+# maybe also need to account for random effect of the site
+
+acf(residuals(mod_gam),main="raw residual ACF")
+
+summary(mod_gam)
+
+gam.check(mod_gam, rep = 500)
+
+appraise(mod_gam, method = "simulate")
+
+plot(mod_gam)
+
+sea %>%
+  ggplot(aes(x = Age_cal_BP, y = RSL_m)) +
+  geom_point()+
+  geom_errorbar(aes(ymin=RSL_m-RSL_2sig, 
+                    ymax=RSL_m+RSL_2sig),
+                width=.2)+
+  geom_errorbar(aes(xmin= Age_2sig_neg, 
+                    xmax= Age_2sig_pos),
+                width=.2)+
+  geom_line(
+    colour = "blue", 
+    size = 1.2,
+    aes(y = fitted(mod_gam))
+  ) +
+  theme_classic()
+
+```
+
+Pretty good model fit. Explains 78.5% of the variation in the data. K is fairly high, k-index less than 1 but edf and k are not close and p-value is not significant. Allowed maximum amount of k for observations.
+
+Very little autocorrelation in data once filtering SEAMIS more specifically.
+
+Deviance of residuals could be better but generally checks look fine.
+
+```{r}
+
+# predict RSL for every year available in the data 
+
+sea_tidy <- tidygam::predict_gam(mod_gam, length_out = 7905)%>%
+  mutate(Age_cal_BP = round(Age_cal_BP))
+
+# make two plots - same dimension etc. to overlay with infinity
+
+t <- c(-69, -50, 0, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 7500, 8000)
+
+# plot of individual points for RSL from SEAMIS
+
+dat <- sea %>%
+  ggplot(aes(x= RSL_m, y = Age_cal_BP)) +
+  #geom_point(colour = "grey")+
+  geom_errorbar(aes(xmin=RSL_m - RSL_2sig, 
+                    xmax=RSL_m + RSL_2sig),
+                width=.1, colour = "grey")+
+  geom_errorbar(aes(ymin= Age_2sig_neg, 
+                    ymax= Age_2sig_pos),
+                width=.1, colour = "grey")+
+  scale_x_continuous(limits = c(-10, 10), breaks = c(-10, 0, 5, 10))+
+  scale_y_reverse(limits = c(8000, -69), 
+                  breaks = c(-69, -50, 0, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 7500, 8000)) +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  ggtitle("RSL Data")
+
+# plot of predicted RSL based on GAM of SEAMIS data with conf int
+
+gam <- sea_tidy %>%
+  ggplot(aes(x= RSL_m, y = Age_cal_BP)) +
+  geom_path(colour = "darkorange") +
+  geom_ribbon(aes(xmin = lower_ci, xmax = upper_ci),fill = "orange", alpha = 0.1)+
+  scale_x_continuous(limits = c(-10, 10), breaks = c(-10, 0, 5, 10))+
+  scale_y_reverse(limits = c(8000, -69), 
+                  breaks = c(-69, -50, 0, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 7500, 8000)) +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  ggtitle("RSL GAM")
+
+# save predicted RSL for use as env var in ordination
+
+write.csv(sea_tidy, file = "SEA_RSL_gam.csv")
+
+```
+
+
+### Fit a GAMM with temporal autocorrelation to try to improve model
+
+```{r}
+
+mod_gamm <- gamm(RSL_m ~ s(Age_cal_BP, k = 112),# long term
+                correlation = corCAR1(form = ~ Age_cal_BP | Sub_region), data = sea, method = "REML")
+
+acf(residuals(mod_gamm$gam),main="raw residual ACF")
+
+summary(mod_gamm$gam)
+
+gam.check(mod_gamm$gam, rep = 500)
+
+appraise(mod_gamm$gam, method = "simulate")
+
+plot(mod_gamm$gam)
+
+sea %>%
+  ggplot(aes(x = Age_cal_BP, y = RSL_m)) +
+  geom_point()+
+  geom_errorbar(aes(ymin=RSL_m-RSL_2sig, 
+                    ymax=RSL_m+RSL_2sig),
+                width=.2)+
+  geom_errorbar(aes(xmin= Age_2sig_neg, 
+                    xmax= Age_2sig_pos),
+                width=.2)+
+  geom_line(
+    colour = "blue", 
+    size = 1.2,
+    aes(y = fitted(mod_gamm$gam))
+  ) +
+  theme_classic()
+
+
+sea_tidy2 <- tidygam::predict_gam(mod_gamm$gam, length_out = 7905)%>%
+  mutate(Age_cal_BP = round(Age_cal_BP))
+
+write.csv(sea_tidy, file = "SEA_RSL_gamm.csv")
+
+```
+Explains 78.6% of the variation in the data so slightly more than the GAM. K is fairly high, k-index less than 1 but edf and k are not close and p-value is not significant and k-index is higher than for GAM. Allowed maximum amount of k for observations.
+
+Very little change in autocorrelation between GAM and GAMM.
+
+Deviance of residuals could be better but generally checks look fine and an improvement over GAM.
+
+### Plotting interpolated regional RSL from GAMM
+
+```{r}
+
+# plot of predicted RSL based on GAM of SEAMIS data with conf int
+
+gamm <- sea_tidy2 %>%
+  ggplot(aes(x= RSL_m, y = Age_cal_BP)) +
+  geom_path(colour = "#394F6B") +
+  geom_ribbon(aes(xmin = lower_ci, xmax = upper_ci),fill = "#55BEC0", alpha = 0.1)+
+  scale_x_continuous(limits = c(-10, 10), breaks = c(-10, 0, 5, 10))+
+  scale_y_reverse(limits = c(8000, -69), 
+                  breaks = c(-69, -50, 0, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 7500, 8000)) +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  ggtitle("RSL GAMM")
+
+library(ggpubr)
+
+ggarrange(gam, dat, gamm, ncol = 3)
+
+
+```
+
+### modern changes in SL
+
+```{r}
+
+
+mod_SL <- read.csv("Ind_mean_change_SL.csv") %>%
+  pivot_longer(cols=-year, names_to="satelite", values_to="change_SL")  %>%
+  mutate(change_SL_m = change_SL / 1000)%>%
+  mutate(Age_BP = 1950 - year )
+
+mod_SL %>%
+  ggplot(aes(x = Age_BP, y = change_SL_m, colour = satelite)) +
+  geom_point()+
+  theme_classic()
+
+
+mod_SL %>%
+  ggplot(aes(x = change_SL_m, y = Age_BP, colour = satelite, shape = satelite)) +
+  geom_point()+
+  scale_x_continuous(limits = c(-10, 10), breaks = c(-10, 0, 5, 10), position = "top")+
+  scale_y_reverse(limits = c(8000, -69), 
+                  breaks = c(-69, -50, 0, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 7500, 8000)) +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  scale_colour_brewer(palette = "Set2")
+  ggtitle("SL Data")
+  
+  ## lk1
+  
+  mod_SL %>%
+  ggplot(aes(x = change_SL_m, y = Age_BP, colour = satelite, shape = satelite)) +
+  geom_point()+
+  scale_x_continuous(limits = c(-10, 10), breaks = c(-10, 0, 5, 10), position = "top")+
+  scale_y_reverse(limits = c(850, -69), 
+                  breaks = c(-69, 70, 100, 150, 200, 250, 
+                             300, 350, 400, 450, 500, 550, 
+                             600, 650, 700, 750, 800, 850))+
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  scale_colour_brewer(palette = "Set2")
+  ggtitle("SL Data")
+  
+  #lk2
+  mod_SL %>%
+  ggplot(aes(x = change_SL_m, y = Age_BP, colour = satelite, shape = satelite)) +
+  geom_point()+
+  scale_x_continuous(limits = c(-10, 10), breaks = c(-10, 0, 5, 10), position = "top")+
+  scale_y_reverse(limits = c(200, -69), 
+                  breaks = c(-69, -50, -30, 0, 50, 100, 150, 170, 200))+
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  scale_colour_brewer(palette = "Set2")
+
+  
+
+```
+

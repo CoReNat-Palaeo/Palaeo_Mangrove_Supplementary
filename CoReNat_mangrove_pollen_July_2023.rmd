@@ -1,0 +1,464 @@
+---
+title: "CoReNat_mangrove_sum"
+author: "Rachael Holmes"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  pdf_document: default
+classoption: landscape
+---
+
+### Load libraries
+
+```{r, warning=FALSE}
+
+options(tidyverse.quiet = TRUE)
+library(tidyverse) # for syntax
+library(readxl) # read excel files
+library(riojaPlot) # for plotting
+library(vegan) # for rarefy function
+```
+
+### Set up data
+
+```{r, warning=FALSE}
+
+
+MHc <- read.csv("MH_ages.csv")
+LKNc <- read.csv("LKN_age.csv")
+LKREc <- read.csv("LKRE_age.csv")
+
+gp_lookup <- read_csv("Groups.csv")
+
+allpoll_list <- rio::import_list("cores_dates.xlsx")
+
+allpoll_nested <- tibble(Site=names(allpoll_list), polldata=allpoll_list) 
+
+```
+
+## Plotting
+
+```{r}
+# function for editing all core data frames in the same way
+
+fun_long_tidy <- function(x) {
+  x_long <- x %>% 
+    pivot_longer(cols=-c("Depth","Age_BP"), names_to="VarName", values_to="Count")%>%
+    replace(is.na(.), 0) %>%
+    left_join(gp_lookup, by = join_by("VarName"))%>%
+    group_by(Depth) %>%
+    mutate(Total = sum(Count)) %>%
+  filter(Total > 100) %>% # removes samples with counts under 100
+  ungroup()%>%
+      arrange(zone_no, Family, Pollen_type2) %>%
+  filter(hab_no <= 1) %>%
+    group_by(Depth) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>% # calculate %
+  ungroup() %>%
+   select(-Order, -Count, -TNumber, -Group, -zone_LK, -ref, -Family, -VarName, -Lifeform,  -habitat, -hab_no,-zone_MH, -zone_no)
+}
+
+# 
+
+# can use nested or in long format
+
+poll_long <- allpoll_nested %>% 
+  mutate(polldata, polldata = map(polldata, ~ fun_long_tidy(.x))) %>%
+  unnest(cols = polldata)
+
+head(poll_long)
+```
+
+
+```{r, fig.width=15, fig.height=7, fig.fullwidth=TRUE}
+
+# data transformations
+
+# pollen
+
+MH_wide <- poll_long %>% # wide for rioja
+  filter(Site == "MH") %>%
+  group_by(Pollen_type2) %>%
+  mutate(max = max(Percent)) %>%
+  ungroup() %>%
+  filter(max > 0) %>% # removes taxa not in core
+  select(-max, - Total, -Site, - habitat2) %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = Pollen_type2, values_from = Percent) 
+
+
+poll <- MH_wide %>%
+  column_to_rownames(var = "Depth") %>%
+  select(-Age_BP)
+
+chron <- MH_wide %>%
+  select(Depth, Age_BP)
+
+# calculate of max of each column
+mx <- sapply(poll, max)
+#create a logical vector which is TRUE for taxa with max < 1
+sel <- mx < 2
+# creates list of names less than 2%
+sel_names <- names(sel[sel]) 
+
+
+# define a custom function to plot symbols 
+
+symb.fun <- function(x, y, i, nm, style) {
+   sel <- x > 0
+   if (sum(sel) > 0) {
+      points(rep(3, sum(sel)), y[sel], cex=0.3, pch=19, xpd=NA)
+   }
+}
+
+# create a list of functions of length equal to the number of columns in the data
+
+funlist <- lapply(1:ncol(poll), function(x) symb.fun)
+
+# now set the elements of the list where we don't want to plot symbols to NULL
+
+funlist[!sel] <- list(NULL)
+
+# set up groups
+
+habitat <- gp_lookup %>%
+  select(Pollen_type2, habitat) %>%
+  rename(VarName = Pollen_type2) %>%
+  group_by(VarName) %>%
+  slice_head()%>%
+  filter(VarName != "Remove")
+
+mang <- gp_lookup %>%
+  arrange(zone_no, Family, Pollen_type2) %>%
+  filter(hab_no <= 2) %>%
+  select(Pollen_type2, zone_MH, habitat) %>%
+  rename(VarName = Pollen_type2)
+
+mang$zone_MH <- factor(mang$zone_MH,
+                      levels=c("Seaward", "Mixed","Estuary","Landward"))
+
+zone <- c("#75CE9F", "#FFC06E","#BDD99E","#01A66F")
+
+ytks1 <- seq(100, 600, by = 100) # set up y axis intervals
+
+hund <- seq(0, 100, by = 20)
+
+ytks1b <- c(hund, ytks1)
+
+mh_depth <- riojaPlot(poll, chron, groups=mang,
+          yvar.name="Depth",
+          scale.percent=TRUE, 
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group= zone,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="auto",
+          col.zones="#232023",
+          ymin=0, ymax=600,
+          ytks1=ytks1,
+          srt.xlabel=45
+          )
+
+```
+
+MH all by age
+
+```{r, fig.width=15, fig.height=7, fig.fullwidth=TRUE}
+
+t <- c(-69, -50, 0, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000)
+
+
+riojaPlot(poll, chron, groups = mang,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          scale.percent=TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=zone,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="auto",
+          col.zones="#232023",
+          ymin=-69, ymax=8000,
+          ytks1=t,
+          ytks2=ytks1b,
+          srt.xlabel=45
+          )
+
+## Plot mangroves only + summary groups
+
+## dieback to modern
+
+t3 <- seq(0, 600, by=5)
+
+ytks2 <- c(-69, -30, 0, 50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500)
+
+riojaPlot(poll, chron, groups=mang,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          scale.percent=TRUE, 
+          plot.exag= TRUE,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=zone,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="auto",
+          col.zones="#232023",
+          ymin=-69, ymax=1500,
+          ytks1=ytks2,
+          ytks2=t3,
+          srt.xlabel=45,
+          cex.xlabel=0.7)
+
+#historic diebacks
+
+ytks3 <- seq(-70, 8800, by=10)
+
+riojaPlot(poll, chron, groups=mang,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          scale.percent=TRUE, 
+          plot.exag= TRUE,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=zone,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="auto",
+          col.zones="#232023",
+          ymin=-69, ymax=0,
+          ytks1=ytks3,
+          ytks2=t3,
+          srt.xlabel=45,
+          cex.xlabel=0.7)
+
+```
+
+
+LKN
+
+```{r, fig.width=15, fig.height=7, fig.fullwidth=TRUE}
+
+# transformations
+
+LKN_wide <- poll_long %>% # wide for rioja
+  filter(Site == "LKN") %>%
+  group_by(Pollen_type2) %>%
+  mutate(max = max(Percent)) %>%
+  ungroup() %>%
+  filter(max > 0) %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = Pollen_type2, values_from = Percent, values_fill=0) 
+
+LKN_sum <- poll_long %>% # wide for rioja
+  filter(Site == "LKN") %>%
+  group_by(Pollen_type2) %>%
+  mutate(max = max(Percent)) %>%
+  ungroup() %>%
+  filter(max > 0)
+
+
+poll <- LKN_wide %>%
+  column_to_rownames(var = "Depth") %>%
+  select(-Age_BP)
+
+chron <- LKN_wide %>%
+  select(Depth, Age_BP)
+
+# select variables with maximum value > 2%
+max2 <- sapply(poll, max) > 2
+max2_names <- names(max2[max2]) 
+
+# select variables with maximum value < 5%
+
+# calculate max of each column
+mx <- sapply(poll, max)
+#create a logical vector which is TRUE for taxa with max < 1
+sel <- mx < 1
+# creates list of names less than 1%
+sel_names <- names(sel[sel]) 
+
+# create a list of functions of length equal to the number of columns in the data
+
+funlist <- lapply(1:ncol(poll), function(x) symb.fun)
+
+# now set the elements of the list where we don't want to plot symbols to NULL
+
+funlist[!sel] <- list(NULL)
+
+ytks1 <- seq(0, 200, by=10)
+
+riojaPlot(poll, chron, groups=mang,
+          yvar.name="Depth",
+          scale.percent=TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=zone,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="2",
+   col.zones="#232023",
+          ymin=0, ymax=192,
+          ytks1=ytks1,
+          srt.xlabel=45)
+
+# age
+
+ytks2 <- seq(-70, 175, by=10)
+
+riojaPlot(poll, chron, groups=mang,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          scale.percent=TRUE, 
+         plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=zone,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="2",
+          col.zones="#232023",
+          ymin=-69, ymax=175,
+          ytks1=ytks2,
+          ytks2=ytks1,
+          srt.xlabel=45)
+```
+
+LKRE
+
+```{r, fig.width=15, fig.height=7, fig.fullwidth=TRUE}
+
+
+LKRE_wide <- poll_long %>% # wide for rioja
+  filter(Site == "LKRE") %>%
+  group_by(Pollen_type2) %>%
+  mutate(max = max(Percent)) %>%
+  ungroup() %>%
+  filter(max > 0) %>% # removes taxa not in core
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = Pollen_type2, values_from = Percent, values_fill=0) 
+ 
+
+poll <- LKRE_wide %>%
+  column_to_rownames(var = "Depth") %>%
+  select(-Age_BP)
+
+chron <- LKRE_wide %>%
+  select(Depth, Age_BP)
+
+# select variables with maximum value < 5%
+
+# calculate max of each column
+mx <- sapply(poll, max)
+#create a logical vector which is TRUE for taxa with max < 5
+sel <- mx < 1
+# creates list of names less than 2%
+sel_names <- names(sel[sel]) 
+
+# create a list of functions of length equal to the number of columns in the data
+
+funlist <- lapply(1:ncol(poll), function(x) symb.fun)
+
+# now set the elements of the list where we don't want to plot symbols to NULL
+
+funlist[!sel] <- list(NULL)
+
+ytks1 <- seq(0, 300, by=10)
+
+riojaPlot(poll, chron, groups=mang,
+          yvar.name="Depth",
+          scale.percent=TRUE, 
+          plot.exag= TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=zone,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+   plot.clust=TRUE,
+   plot.zones="auto",
+          col.zones="#232023",
+          ymin=0, ymax=295,
+          ytks1=ytks1,
+          srt.xlabel=45)
+
+ytks2 <- seq(-70, 850, by=20)
+
+riojaPlot(poll, chron, groups=mang,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          scale.percent=TRUE, 
+          plot.exag= TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=zone,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+   plot.clust=TRUE,
+   plot.zones=2,
+          col.zones="#232023",
+   ymin=-69, ymax=850,
+          ytks1=ytks2,
+          ytks2=ytks1,
+          srt.xlabel=45)
+
+```

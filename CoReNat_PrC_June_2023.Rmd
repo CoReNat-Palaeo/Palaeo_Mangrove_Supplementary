@@ -1,0 +1,616 @@
+---
+title: "Principal_response_curve_PrC"
+author: "Rachael Holmes"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+Load in & setup data
+
+```{r, warning=FALSE}
+
+library(tidyverse)
+library(vegan)
+library(readxl) # read excel files
+library(tidymodels)
+library(gridExtra)
+
+allpoll_list <- rio::import_list("cores_dates.xlsx")
+
+allpoll_nested <- tibble(Site=names(allpoll_list), polldata=allpoll_list)
+
+gp_lookup <- read_csv("Groups.csv")
+
+fun_long_tidy <- function(x) {
+  
+  x_long <- x %>% 
+    pivot_longer(cols=-c("Depth","Age_BP"), 
+                 names_to="VarName", 
+                 values_to="Count")%>%
+    replace(is.na(.), 0) %>%
+    group_by(Depth) %>%
+  filter(sum(Count) > 100) %>% # removes samples with counts under 100
+  ungroup() %>%
+    group_by(VarName) %>%
+    filter(sum(Count) != 0)%>%
+    ungroup()%>%
+    group_by(Depth) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>% # calculate %
+  ungroup()
+}
+
+# can use nested or in long format
+
+poll_long <- allpoll_nested %>% 
+  mutate(polldata, polldata = map(polldata, ~ fun_long_tidy(.x))) %>%
+  unnest(cols = polldata)
+
+head(poll_long)
+
+# create a wide format
+
+MH_wide <- poll_long %>% # wide for rioja
+  filter(Site == "MH") %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Count, values_fill=0) 
+
+MH_wide_perc <- poll_long %>% # wide for rioja
+  filter(Site == "MH") %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Percent, values_fill=0)
+
+MH_wide_perc_5 <- poll_long %>% # wide for rioja
+  filter(Site == "MH") %>%
+  filter(Percent >= 5) %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Percent, values_fill=0)
+
+
+MH_pol <- MH_wide %>%
+  # read in data with species as columns and samples as rows
+  column_to_rownames(var = "Depth") %>%
+  select(-Age_BP) 
+
+
+chron <- MH_wide %>%
+  select(Depth, Age_BP)
+
+MH_mangrove_perc <- poll_long %>% # wide for rioja
+  filter(Site == "MH") %>%
+  group_by(Depth) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>% # calculate %
+  ungroup() %>%
+  left_join(gp_lookup) %>%
+  group_by(Depth, Age_BP, habitat2)%>%
+  summarise(Habitat_perc = sum(Percent))%>%
+  filter(habitat2 == "Mangrove")
+
+## LKN
+
+LKN_wide <- poll_long %>% # wide for rioja
+  filter(Site == "LKN") %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Count, values_fill=0) 
+
+LKN_wide_perc <- poll_long %>% # wide for rioja
+  filter(Site == "LKN") %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Percent, values_fill=0)
+
+LKN_pol <- LKN_wide %>%
+  select(-Depth, -Age_BP) %>%
+  as.matrix()
+
+chron_LKN <- LKN_wide %>%
+  select(Depth, Age_BP)
+
+LKN_mangrove_perc <- poll_long %>% # wide for rioja
+  filter(Site == "LKN") %>%
+  group_by(Depth) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>% # calculate %
+  ungroup() %>%
+  left_join(gp_lookup) %>%
+  group_by(Depth, Age_BP, habitat2)%>%
+  summarise(Habitat_perc = sum(Percent))%>%
+  filter(habitat2 == "Mangrove")
+
+## LKRE
+
+LKRE_wide <- poll_long %>% # wide for rioja
+  filter(Site == "LKRE") %>%
+    filter(Depth != 0) %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Count, values_fill=0) 
+
+LKRE_wide_perc <- poll_long %>% # wide for rioja
+  filter(Site == "LKRE") %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Percent, values_fill=0)
+
+LKRE_pol <- LKRE_wide %>%
+  select(-Depth, -Age_BP) %>%
+  as.matrix()
+
+chron_LKRE <- LKRE_wide %>%
+  select(Depth, Age_BP)
+
+LKRE_mangrove_perc <- poll_long %>% # wide for rioja
+  filter(Site == "LKRE") %>%
+  group_by(Depth) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>% # calculate %
+  ungroup() %>%
+  left_join(gp_lookup) %>%
+  group_by(Depth, Age_BP, habitat2)%>%
+  summarise(Habitat_perc = sum(Percent))%>%
+  filter(habitat2 == "Mangrove")
+
+
+```
+
+
+### Principle response curve
+
+Identifying periods of rapid ecological change. 
+
+```{r, warning=FALSE}
+
+# Hellinger-transformation and Prcurve
+
+library(analogue)
+library(mgcv)
+library(gratia)
+
+prc1 <- prcurve(decostand(MH_pol,"hellinger"), 
+                # applies hellinger transformation to 
+                #convert abundance to relative
+                maxit = 50) # number of iterations
+
+prc1 # print results
+
+```
+
+PrC explains 48% of the variance.
+
+```{r}
+
+# extract data
+
+prcurveScores <- data.frame(chron, scores(prc1))
+
+# plot curve
+
+# by age
+
+prcurveScores %>%
+  ggplot(aes(x = Age_BP, y = PrC)) +
+  geom_vline(xintercept = 600, linetype = "dotdash",
+             colour = "darkorange") +
+  geom_vline(xintercept = -20, linetype = "dashed",
+             colour = "purple") +
+  geom_vline(xintercept = -62, linetype = "dashed",
+             colour = "green") +
+  geom_point(shape = 16) +
+  geom_line() +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  # Reversed y-axis
+  scale_x_reverse()
+
+# by depth
+
+prcurveScores %>%
+  ggplot(aes(x = Depth, y = PrC)) +
+  geom_point(shape = 16) +
+  geom_line() +
+  geom_vline(xintercept = 63, linetype = "dotdash",
+             colour = "darkorange") +
+  geom_vline(xintercept = 50, linetype = "dashed",
+             colour = "purple") +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  # Reversed x-axis
+  scale_x_reverse()
+
+# fit GAMM to test for where periods of rapid change occur.
+
+prcurveScores$Age_BP <- round(prcurveScores$Age_BP, 0)
+
+# setting k to n depths - 1
+
+prGamm <- gamm(PrC ~ s(Age_BP, bs = "cr", k = 44),
+               correlation = corCAR1(form = ~ Age_BP),
+               # method = "REML",
+               data = prcurveScores)
+
+par(mfrow = c(2,2))
+
+acf(residuals(prGamm$gam),main="raw residual ACF")
+
+summary(prGamm$gam)
+
+gam.check(prGamm$gam, rep = 500)
+
+appraise(prGamm$gam, method = "simulate")
+
+plot(prGamm$gam)
+
+GAMMsterPlot <- prcurveScores %>%
+  ggplot(aes(x = Age_BP, y = PrC)) +
+  geom_point() +
+  theme_bw() +
+  geom_line(y = fitted(prGamm$gam), colour = "red2")
+
+```
+
+
+
+```{r}
+
+# trying gam with adaptive splines
+
+prGam <- gam(PrC ~ s(Age_BP, bs = "ad", k = 44),
+             # correlation = corCAR1(form = ~ Age_BP),
+             method = "REML",
+             data = prcurveScores)
+
+acf(residuals(prGam),main="raw residual ACF")
+
+summary(prGam)
+
+gam.check(prGam, rep = 500)
+
+appraise(prGam, method = "simulate")
+
+plot(prGam)
+
+GAMsterPlot <- prcurveScores %>%
+  ggplot(aes(x = Age_BP, y = PrC)) +
+  geom_point() +
+  theme_bw() +
+  geom_line(y = fitted(prGam), colour = "royalblue")
+
+grid.arrange(GAMMsterPlot + ggtitle("(A) GAMM plot"),
+             GAMsterPlot + ggtitle("(B) GAM plot"),
+             nrow = 1)
+
+```
+
+Plot rapid rates of change
+
+```{r}
+
+mod <- prGamm$gam
+
+pcData <- data.frame(Age_BP = seq(from =ceiling(min(chron$Age_BP)),
+                                to = floor(max(chron$Age_BP)),
+                                by = 1))
+
+predPC <- data.frame(pcData, predicted = predict(mod, newdata = pcData))
+
+derivsPC <- fderiv(mod, newdata = pcData)
+
+derivsContPC <- data.frame(pcData,confint(derivsPC, type = "simultaneous"))
+
+signifD <- function(x, d, upper, lower, eval = 0) {
+    miss <- upper > eval & lower < eval
+    incr <- decr <- x
+    want <- d > eval
+    incr[!want | miss] <- NA
+    want <- d < eval
+    decr[!want | miss] <- NA
+    list(incr = incr, decr = decr)
+}
+
+sizesPC <- signifD(derivsContPC$Age_BP, d = derivsContPC$est, 
+                   upper = derivsContPC$upper,
+                   lower = derivsContPC$lower)
+
+predSigsPC <- data.frame(Age_BP = predPC$Age_BP,
+                         predicted = predPC$predicted,
+                         increasing = sizesPC[[1]],
+                         decreasing = sizesPC[[2]])
+
+t <- c(-69, -50, 0, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000)
+
+predPC %>%
+  ggplot(aes(x= Age_BP, y = predicted)) +
+  geom_point(data = prcurveScores, aes(y = PrC), shape = 1) +
+  geom_path() +
+  geom_path(data= predSigsPC, aes(x = decreasing), size = 2) +
+  geom_path(data= predSigsPC, aes(x = increasing), size = 2) +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  scale_x_reverse()
+
+MH_zone <- MH_mangrove_perc %>%
+  mutate(Zone = case_when(Age_BP < 0 ~ 'zone2b',
+  Age_BP < 800 ~ 'zone2a',
+  Age_BP < 2100 ~ 'zone1c',
+  Age_BP < 7500 ~ 'zone1b',
+  Age_BP < 8000 ~ 'zone1a')) 
+
+MH_zone_summary <- MH_zone %>%
+  group_by(Zone)%>%
+  summarise(N_depths = n(), min = min(Habitat_perc),max = max(Habitat_perc), mean = mean(Habitat_perc), sd = sd(Habitat_perc))
+
+MH_zone_summary %>%
+  tibble()
+
+```
+
+# Repeat for Likupang
+
+```{r}
+
+# Hellinger-transformation and Prcurve
+
+prc2 <- prcurve(decostand(LKN_pol,"hellinger"), 
+                # applies hellinger transformation to 
+                #convert abundance to relative
+                maxit = 50) # number of iterations
+
+prc2 # print results
+
+# extract data
+
+prcurveScores <- data.frame(chron_LKN, scores(prc2))
+
+# plot curve
+
+# by age
+
+prcurveScores %>%
+  ggplot(aes(x = Age_BP, y = PrC)) +
+  geom_vline(xintercept = -30, linetype = "dotdash",
+             colour = "darkorange") +
+  geom_point(shape = 16) +
+  geom_line() +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  # Reversed y-axis
+  scale_x_reverse()
+
+# by depth
+
+prcurveScores %>%
+  ggplot(aes(x = Depth, y = PrC)) +
+  geom_point(shape = 16) +
+  geom_line() +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  # Reversed x-axis
+  scale_x_reverse()
+
+# fit GAMM to test for where periods of rapid change occur.
+
+prcurveScores$Age_BP <- round(prcurveScores$Age_BP, 0)
+
+prGamm <- gamm(PrC ~ s(Age_BP, bs = "cr", k = 25),
+               correlation = corCAR1(form = ~ Age_BP),
+               # method = "REML",
+               data = prcurveScores)
+
+par(mfrow = c(2,2))
+
+acf(residuals(prGamm$gam),main="raw residual ACF")
+
+summary(prGamm$gam)
+
+gam.check(prGamm$gam, rep = 500)
+
+appraise(prGamm$gam, method = "simulate")
+
+plot(prGamm$gam)
+
+GAMMsterPlot <- prcurveScores %>%
+  ggplot(aes(x = Age_BP, y = PrC)) +
+  geom_point() +
+  theme_bw() +
+  geom_line(y = fitted(prGamm$gam), colour = "red2")
+
+# trying gam with adaptive splines
+
+prGam <- gam(PrC ~ s(Age_BP, bs = "ad", k = 25),
+             # correlation = corCAR1(form = ~ Age_BP),
+             method = "REML",
+             data = prcurveScores)
+
+GAMsterPlot <- prcurveScores %>%
+  ggplot(aes(x = Age_BP, y = PrC)) +
+  geom_point() +
+  theme_bw() +
+  geom_line(y = fitted(prGam), colour = "royalblue")
+
+grid.arrange(GAMMsterPlot + ggtitle("(A) GAMM plot"),
+             GAMsterPlot + ggtitle("(B) GAM plot"),
+             nrow = 1)
+
+acf(residuals(prGam),main="raw residual ACF")
+
+summary(prGam)
+
+gam.check(prGam, rep = 500)
+
+appraise(prGam, method = "simulate")
+
+
+```
+
+GAM with adaptive splines much better for LKN. 
+
+Plot rapid rates of change
+
+```{r}
+
+mod <- prGam
+
+pcData <- data.frame(Age_BP = seq(from =ceiling(min(chron_LKN$Age_BP)),
+                                to = floor(max(chron_LKN$Age_BP)),
+                                by = 1))
+
+predPC <- data.frame(pcData, predicted = predict(mod, newdata = pcData))
+
+derivsPC <- fderiv(mod, newdata = pcData)
+
+derivsContPC <- data.frame(pcData,confint(derivsPC, type = "simultaneous"))
+
+sizesPC <- signifD(derivsContPC$Age_BP, d = derivsContPC$est, 
+                   upper = derivsContPC$upper,
+                   lower = derivsContPC$lower)
+
+predSigsPC <- data.frame(Age_BP = predPC$Age_BP,
+                         predicted = predPC$predicted,
+                         increasing = sizesPC[[1]],
+                         decreasing = sizesPC[[2]])
+
+predPC %>%
+  ggplot(aes(x= Age_BP, y = predicted)) +
+  geom_point(data = prcurveScores, aes(y = PrC), shape = 1) +
+  geom_path() +
+  geom_path(data= predSigsPC, aes(x = decreasing), size = 2) +
+  geom_path(data= predSigsPC, aes(x = increasing), size = 2) +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  scale_x_reverse()
+
+```
+
+No rapid periods of change identified but PrC only explains 20% of the variance in the data.
+
+LKRE
+
+```{r}
+
+# Hellinger-transformation and Prcurve
+
+prc3 <- prcurve(decostand(LKRE_pol,"hellinger"), 
+                # applies hellinger transformation to 
+                #convert abundance to relative
+                maxit = 50) # number of iterations
+
+prc3 # print results
+
+# extract data
+
+prcurveScores <- data.frame(chron_LKRE, scores(prc3))
+
+# plot curve
+
+# by age
+
+prcurveScores %>%
+  ggplot(aes(x = Age_BP, y = PrC)) +
+  geom_vline(xintercept = 687, linetype = "dotdash",
+             colour = "darkorange") +
+  geom_vline(xintercept = 485, linetype = "dotdash",
+             colour = "darkorange") +
+  geom_point(shape = 16) +
+  geom_line() +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  # Reversed y-axis
+  scale_x_reverse()
+
+# by depth
+
+prcurveScores %>%
+  ggplot(aes(x = Depth, y = PrC)) +
+  geom_point(shape = 16) +
+  geom_point(shape = 16) +
+  geom_line() +
+   geom_vline(xintercept = 255, linetype = "dotdash",
+             colour = "darkorange") +
+  geom_vline(xintercept = 200, linetype = "dotdash",
+             colour = "darkorange") +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  # Reversed x-axis
+  scale_x_reverse()
+
+# fit GAMM to test for where periods of rapid change occur.
+
+prcurveScores$Age_BP <- round(prcurveScores$Age_BP, 0)
+
+prGamm <- gamm(PrC ~ s(Age_BP, bs = "cr", k = 14),
+               correlation = corCAR1(form = ~ Age_BP),
+               # method = "REML",
+               data = prcurveScores)
+
+par(mfrow = c(2,2))
+
+acf(residuals(prGamm$gam),main="raw residual ACF")
+
+summary(prGamm$gam)
+
+gam.check(prGamm$gam, rep = 500)
+
+appraise(prGamm$gam, method = "simulate")
+
+plot(prGamm$gam)
+
+GAMMsterPlot <- prcurveScores %>%
+  ggplot(aes(x = Age_BP, y = PrC)) +
+  geom_point() +
+  theme_bw() +
+  geom_line(y = fitted(prGamm$gam), colour = "red2")
+
+# trying gam with adaptive splines
+
+prGam <- gam(PrC ~ s(Age_BP, bs = "ad", k = 14),
+             # correlation = corCAR1(form = ~ year),
+             method = "REML",
+             data = prcurveScores)
+
+GAMsterPlot <- prcurveScores %>%
+  ggplot(aes(x = Age_BP, y = PrC)) +
+  geom_point() +
+  theme_bw() +
+  geom_line(y = fitted(prGam), colour = "royalblue")
+
+grid.arrange(GAMMsterPlot + ggtitle("(A) GAMM plot"),
+             GAMsterPlot + ggtitle("(B) GAM plot"),
+             nrow = 1)
+
+acf(residuals(prGam),main="raw residual ACF")
+
+summary(prGam)
+
+gam.check(prGam, rep = 500)
+
+appraise(prGam, method = "simulate")
+
+```
+```{r}
+
+mod <- prGam
+
+pcData <- data.frame(Age_BP = seq(from =ceiling(min(chron_LKRE$Age_BP)),
+                                to = floor(max(chron_LKRE$Age_BP)),
+                                by = 1))
+
+predPC <- data.frame(pcData, predicted = predict(mod, newdata = pcData))
+
+derivsPC <- fderiv(mod, newdata = pcData)
+
+derivsContPC <- data.frame(pcData,confint(derivsPC, type = "simultaneous"))
+
+sizesPC <- signifD(derivsContPC$Age_BP, d = derivsContPC$est, 
+                   upper = derivsContPC$upper,
+                   lower = derivsContPC$lower)
+
+predSigsPC <- data.frame(Age_BP = predPC$Age_BP,
+                         predicted = predPC$predicted,
+                         increasing = sizesPC[[1]],
+                         decreasing = sizesPC[[2]])
+
+predPC %>%
+  ggplot(aes(x= Age_BP, y = predicted)) +
+  geom_point(data = prcurveScores, aes(y = PrC), shape = 1) +
+  geom_path() +
+  geom_path(data= predSigsPC, aes(x = decreasing), size = 2) +
+  geom_path(data= predSigsPC, aes(x = increasing), size = 2) +
+  theme_bw() +
+  theme(panel.grid = element_blank())+
+  scale_x_reverse()
+
+```

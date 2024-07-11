@@ -1,0 +1,844 @@
+---
+title: "CoReNat_palaeo_v2"
+author: "Rachael Holmes"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+### Load libraries
+
+```{r, warning=FALSE}
+
+options(tidyverse.quiet = TRUE)
+library(tidyverse) # for syntax
+library(readxl) # read excel files
+library(riojaPlot) # for plotting
+library(vegan) # for rarefy function
+```
+
+### Set up data
+
+```{r, warning=FALSE}
+
+MH <- read_excel("cores.xlsx", sheet="MH")
+LKN <- read_excel("cores.xlsx", sheet="LKN")
+LKRE <- read_excel("cores.xlsx", sheet="LKRE")
+
+gp_lookup <- read_csv("Groups.csv")
+```
+
+## Add dates to depths
+
+```{r}
+
+MHc <- read.csv("MH_age.csv")
+LKNc <- read.csv("LKN_age.csv")
+LKREc <- read.csv("LKRE_age.csv")
+
+MH <- MH %>%
+  left_join(MHc) %>% # combines dates
+  select(c(-min, -max, -median))%>%
+  relocate(Age_BP, .after = Depth) %>%
+  replace(is.na(.), 0)
+
+LKN <- LKN %>%
+  mutate(Depth = round(Depth, digits = 0)) %>%
+  left_join(LKNc) %>% # combine dates
+  select(c(-min, -max, -median))%>%
+  relocate(Age_BP, .after = Depth) %>%
+  replace(is.na(.), 0)
+
+LKRE <- LKRE %>%
+  mutate(Depth = round(Depth, digits = 0)) %>%
+  left_join(LKREc) %>% # combine dates
+  select(c(-min, -max, -median))%>%
+  relocate(Age_BP, .after = Depth) %>%
+  replace(is.na(.), 0)
+
+write.csv(MH, file = "MH_dates.csv")
+write.csv(LKN, file = "LKN_dates.csv")
+write.csv(LKRE, file = "LKRE_dates.csv")
+# long format
+
+MH_long <- MH %>% 
+  pivot_longer(cols=-c("Depth", "Age_BP"),                   
+               names_to="VarName", values_to="Count")
+
+LKN_long <- LKN %>% 
+  pivot_longer(cols=-c("Depth", "Age_BP"),                   
+               names_to="VarName", values_to="Count")
+
+LKRE_long <- LKRE %>% 
+  pivot_longer(cols=-c("Depth", "Age_BP"),                   
+               names_to="VarName", values_to="Count")
+
+```
+
+## Rarefaction
+
+Recombined tables into excel file after adding chronology.
+
+Followed code for rarefaction from Jari Oksanen
+
+```{r}
+
+allpoll_list <- rio::import_list("cores_dates.xlsx")
+
+allpoll_nested <- tibble(Site=names(allpoll_list), polldata=allpoll_list) 
+
+fun_rare <- function(x) {
+   x %>% 
+    pivot_longer(cols=-c("Depth","Age_BP"), names_to="VarName", values_to="Count")%>%
+    replace(is.na(.), 0) %>%
+    group_by(Depth) %>%
+    mutate(Total = sum(Count)) %>%
+  filter(Total > 100) %>% # removes samples with counts under 100
+  ungroup()%>%
+    pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Count, values_fill=0) %>%
+   summarise(Depth, Age_BP, richness=rarefy(round(.[, -(1:2)]), 100))
+}
+
+# apply fun_rare to our nested list using mutate / map
+rich <- allpoll_nested %>% 
+  mutate(polldata, rare=map(polldata, ~fun_rare(.x))) %>%
+  unnest(rare) %>%
+  select(-polldata)
+
+MH_rich <- rich %>%
+  filter(Site == "MH") %>%
+  select(-Site)
+  
+LKN_rich <- rich %>%
+  filter(Site == "LKN") %>%
+  select(-Site)
+
+LKRE_rich <- rich %>%
+  filter(Site == "LKRE") %>%
+  select(-Site)
+
+# apply fun_rare to a subset of the last 1500 years
+rich_1500 <- allpoll_nested %>% 
+  mutate(polldata = map(polldata, ~ filter(., Age_BP <= 1500)))%>%
+  mutate(polldata, rare=map(polldata, ~fun_rare(.x))) %>%
+  unnest(rare) %>%
+  select(-polldata)
+
+rare_all <- ggplot(rich, aes(Age_BP, richness, col=Site)) +
+  geom_line() +
+  scale_x_continuous(breaks=seq(0, 20000, by=2000)) +
+  scale_colour_brewer(palette = "Set2") +
+  theme_bw() +
+  theme(legend.position="right", 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))+
+  xlab("cal. Age BP") + 
+  ylab("Pollen richness")
+
+
+rare_all_1500 <- ggplot(rich_1500, aes(Age_BP, richness, col=Site)) +
+  geom_line() +
+  scale_x_continuous(breaks=seq(0, 1500, by=100)) +
+  scale_colour_brewer(palette = "Set2") +
+  theme_bw() +
+  theme(legend.position="right", 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))+
+  xlab("cal. Age BP") + 
+  ylab("Pollen richness")
+
+rich
+
+rich3 <- rich %>%
+  mutate(neg_Age=-Age_BP) 
+
+# Add a regression line to identify trends
+rich3 %>%
+ggplot(aes(neg_Age, richness, col=Site)) +
+  geom_line() +
+  geom_smooth(method="lm", se=FALSE) +
+  scale_x_continuous(breaks=seq(-9000, 70, by=500)) +
+  labs(x="Neg. Years BP") +
+  theme(legend.position="none")
+
+if (0) {
+rich3 %>%
+  group_by(Site) %>%
+  summarise(lm(richness ~ neg_Age), .groups="drop") 
+}
+
+RoC <- rich3 %>%
+  group_by(Site) %>%
+  summarise(broom::tidy(lm(richness ~ neg_Age)), .groups="drop") 
+
+RoC
+
+RoC <- rich3 %>%
+  group_by(Site) %>%
+  summarise(broom::tidy(lm(richness ~ neg_Age)), .groups="drop") %>% 
+  filter(term=="neg_Age")
+
+RoC
+
+write.csv(rich, "rare_rich_all.csv")
+
+```
+
+## Plotting
+
+```{r}
+# function for editing all core data frames in the same way
+
+fun_long_tidy <- function(x) {
+  x_long <- x %>% 
+    pivot_longer(cols=-c("Depth","Age_BP"),                   
+                 names_to="VarName", values_to="Count")%>%
+    replace(is.na(.), 0) %>%
+    group_by(Depth, Age_BP) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>% # calculate %
+  ungroup()
+}
+
+
+# can use nested or in long format
+
+poll_long <- allpoll_nested %>% 
+  mutate(polldata, polldata = map(polldata, ~ fun_long_tidy(.x))) %>%
+  unnest(cols = polldata)
+
+poll_long 
+```
+
+Mean % for each site
+
+```{r}
+
+poll_sum <- poll_long %>% # wide for rioja
+  group_by(Depth, Site) %>%
+  mutate(hund = sum(Count)) %>%
+  filter(hund >= 100) %>% # removes samples with counts under 100
+  ungroup() %>%
+  group_by(Site, VarName)%>%
+  summarise(mean = mean(Percent), median = median(Percent), min = min(Percent), max = max(Percent))
+
+poll_sum
+
+```
+
+
+Mantehage
+
+```{r}
+
+# data transformations
+
+# pollen
+
+MH_wide <- poll_long %>% # wide for rioja
+  filter(Site == "MH") %>%
+  group_by(Depth) %>%
+  mutate(hund = sum(Count)) %>%
+  filter(hund >= 100) %>% # removes samples with counts under 100
+  ungroup()%>%
+  group_by(VarName) %>%
+  mutate(max = max(Percent)) %>%
+  ungroup() %>%
+  filter(max > 0) %>% # removes taxa not in core
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Percent, values_fill=0) 
+
+#write.csv(MH_wide, file = "MH_wide_perc.csv")
+
+poll <- MH_wide %>%
+  column_to_rownames(var = "Depth") %>%
+  select(-Age_BP)
+
+chron <- MH_wide %>%
+  select(Depth, Age_BP)
+
+# select variables with maximum value > 5%
+max5 <- sapply(poll, max) > 5
+max5_names <- names(max5[max5]) 
+
+# select variables with maximum value < 5%
+
+# calculate of max of each column
+mx <- sapply(poll, max)
+#create a logical vector which is TRUE for taxa with max < 5
+sel <- mx < 5
+# creates list of names less than 5%
+sel_names <- names(sel[sel]) 
+
+
+# define a custom function to plot symbols 
+
+symb.fun <- function(x, y, i, nm, style) {
+   sel <- x > 0
+   if (sum(sel) > 0) {
+      points(rep(3, sum(sel)), y[sel], cex=0.3, pch=19, xpd=NA)
+   }
+}
+
+# create a list of functions of length equal to the number of columns in the data
+
+funlist <- lapply(1:ncol(poll), function(x) symb.fun)
+
+# now set the elements of the list where we don't want to plot symbols to NULL
+
+funlist[!sel] <- list(NULL)
+
+# set up groups
+
+habitat <- gp_lookup %>%
+  select(VarName, habitat)
+
+habitat$habitat <- factor(habitat$habitat,
+                      levels=c("True_mangrove", "Mangrove_assoc","Mixed","Open/disturbance", "Non-mangrove", "Ferns", "Unknown"))
+
+earth <- c("darkgreen", "#BDD1C5", "#d14a4a","#2aa5a5", "#882d17", "tan", "#CBC3BA")
+
+ytks1 <- seq(0, 600, by = 100) # set up y axis intervals
+
+mh_depth <- riojaPlot(poll, chron, groups=habitat,
+          yvar.name="Depth",
+          scale.percent=TRUE, 
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group= earth,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="auto",
+          col.zones="#232023",
+          ymin=0, ymax=600,
+          ytks1=ytks1,
+          srt.xlabel=45
+          )
+
+
+```
+
+MH all by age
+
+```{r}
+
+t <- c(-69, -50, 0, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000)
+
+riojaPlot(poll, chron, groups = habitat,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          scale.percent=TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=earth,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="auto",
+          col.zones="#232023",
+          ymin=-69, ymax=8750,
+          ytks1=t,
+          ytks2=ytks1,
+          srt.xlabel=45
+          )
+
+## dieback to modern
+
+t3 <- seq(0, 600, by=5)
+
+ytks2 <- seq(-70, 8800, by=50)
+
+riojaPlot(poll, chron, groups=habitat,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          scale.percent=TRUE, 
+          plot.exag= TRUE,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=earth,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="auto",
+          col.zones="#232023",
+          ymin=-69, ymax=1500,
+          ytks1=ytks2,
+          ytks2=t3,
+          srt.xlabel=45,
+          cex.xlabel=0.7)
+
+#historic diebacks
+
+ytks3 <- seq(-70, 8800, by=10)
+
+riojaPlot(poll, chron, groups=habitat,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          scale.percent=TRUE, 
+          plot.exag= TRUE,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=earth,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="auto",
+          col.zones="#232023",
+          ymin=-69, ymax=0,
+          ytks1=ytks3,
+          ytks2=t3,
+          srt.xlabel=45,
+          cex.xlabel=0.7)
+
+```
+
+## Diatoms
+
+```{r}
+
+diatoms <- read_excel("Diat.xlsx")
+
+diat_group <- read_excel("Diat_grp.xlsx")
+
+diat_age <- diatoms %>%
+  left_join(MHc) %>% # combines dates
+  select(c(-min, -max, -median))%>%
+  relocate(Age_BP, .after = Depth) %>%
+  replace(is.na(.), 0) %>%
+  mutate(Age_BP = replace(Age_BP, Age_BP == 0, -69))
+
+# write.csv(diat_age , file = "MH_diat_dates.csv")
+
+```
+
+Set up diatom perc
+
+```{r}
+
+MH_long_d <- diat_age %>% 
+  pivot_longer(cols=-c("Depth", "Age_BP"),                   
+               names_to="VarName", values_to="Count")
+
+MH_long_d <- MH_long_d %>% 
+  group_by(Depth) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>%
+  ungroup() 
+
+MH_wide_d <- MH_long_d %>% 
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from=VarName, values_from=Percent, values_fill=0)
+
+```
+
+
+Diatom plots 
+
+```{r}
+
+diat <- MH_wide_d %>%
+  column_to_rownames(var = "Depth") %>%
+  select(-Age_BP)
+
+chron <- MH_wide_d %>%
+  select(Depth, Age_BP)
+
+# select variables with maximum value < 5%
+
+# calculate of max of each column
+mx <- sapply(diat, max)
+#create a logical vector which is TRUE for taxa with max < 5
+sel <- mx < 5
+# creates list of names less than 5%
+sel_names <- names(sel[sel]) 
+
+# define a custom function to plot symbols 
+
+symb.fun <- function(x, y, i, nm, style) {
+   sel <- x > 0
+   if (sum(sel) > 0) {
+      points(rep(3, sum(sel)), y[sel], cex=0.3, pch=19, xpd=NA)
+   }
+}
+
+# create a list of functions of length equal to the number of columns in the data
+
+funlist <- lapply(1:ncol(diat), function(x) symb.fun)
+
+# now set the elements of the list where we don't want to plot symbols to NULL
+
+funlist[!sel] <- list(NULL)
+
+# set up groups
+
+salinity <- diat_group %>%
+  select(Type, Group) %>%
+  rename(VarName = Type)
+
+salinity$Group <- factor(salinity$Group,
+                      levels=c("Marine", "Marine/Brakish","Brakish/Freshwater", "Freshwater","Mixed" , "Unknown"))
+
+diat_col <- c("#3d5a80", "#98c1d9", "#90e0ef" ,"#ef5675", "#683383", "#CBC3BA")
+
+riojaPlot(diat, chron, groups=salinity,
+          yvar.name="Depth",
+          scale.percent=TRUE, 
+          sep.bar=TRUE,
+          lwd.bar = 1,
+          plot.poly=FALSE,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=FALSE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group= diat_col,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones= 4,
+          col.zones="#232023",
+          ymin=0, ymax=600,
+          ytks1=ytks1,
+          srt.xlabel=45,
+   plot.top.axis = TRUE, 
+   plot.bottom.axis = FALSE)
+
+#wa.order="bottomleft" # order based on appearance in the record
+
+t <- c(-69, -50, 0, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 8750)
+
+t2 <- c(0, 100, 200, 300, 400, 500, 600)
+
+#ytks2 <- seq(-70, 8800, by=1000)
+
+t3 <- seq(0, 60, by=10)
+
+riojaPlot(diat, chron, groups=salinity,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          scale.percent=TRUE, 
+          lwd.bar = 1,
+          plot.poly=FALSE,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=FALSE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group= diat_col,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones= 4,
+          col.zones="#232023",
+          ymin=-69, ymax=8750,
+          ytks1=t,
+          ytks2=t2,
+          srt.xlabel=45)
+
+# close up
+
+riojaPlot(diat, chron, groups=salinity,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          scale.percent=TRUE, 
+          plot.poly=FALSE,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=FALSE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          lwd.bar = 1,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group= diat_col,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones= 4,
+          col.zones="#232023",
+          ymin=-69, ymax=1500,
+          ytks1=t,
+          ytks2=t3,
+          srt.xlabel=45)
+
+
+```
+
+Non percentage plots
+
+```{r}
+# non perc proxies
+
+MH2 <- read.csv("MH_data_2.csv") # second dataset (microcharcoal, concs etc.)
+
+dat2 <- MH2 %>%
+  column_to_rownames(var = "Depth") %>%
+  select(-Age_BP)
+
+chron <- MH2 %>%
+  select(Depth, Age_BP)
+
+# by depth
+
+riojaPlot(dat2, chron,
+          yvar.name="Depth",
+          scale.percent=FALSE, 
+          plot.poly=FALSE,
+   plot.bar = FALSE,
+   plot.line=TRUE,
+   plot.symb=TRUE,
+          symb.cex=0.4,
+   plot.exag=FALSE,
+   cex.xlabel=0.7,
+          ymin=0, ymax=600,
+          ytks1=ytks1,
+          srt.xlabel=45
+          )
+
+# by age
+
+riojaPlot(dat2, chron,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          scale.percent=FALSE, 
+          plot.poly=FALSE,
+   plot.bar = FALSE,
+   plot.line=TRUE,
+   plot.symb=TRUE,
+          symb.cex=0.4,
+   plot.exag=FALSE,
+   cex.xlabel=0.7,
+          ymin=-69, ymax=8750,
+          ytks1=t,
+          ytks2=ytks1,
+          srt.xlabel=45)
+
+
+```
+
+LKN
+
+```{r}
+
+# transformations
+
+LKN_wide <- poll_long %>% # wide for rioja
+  filter(Site == "LKN") %>%
+  group_by(Depth) %>%
+  mutate(hund = sum(Count)) %>%
+  filter(hund >= 100) %>%
+  ungroup()%>%
+  group_by(VarName) %>%
+  mutate(max = max(Percent)) %>%
+  ungroup() %>%
+  filter(max > 0) %>% # removes taxa not in core
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Percent, values_fill=0) 
+
+poll <- LKN_wide %>%
+  column_to_rownames(var = "Depth") %>%
+  select(-Age_BP)
+
+chron <- LKN_wide %>%
+  select(Depth, Age_BP)
+
+# select variables with maximum value > 2%
+max2 <- sapply(poll, max) > 2
+max2_names <- names(max2[max2]) 
+
+# select variables with maximum value < 5%
+
+# calculate max of each column
+mx <- sapply(poll, max)
+#create a logical vector which is TRUE for taxa with max < 5
+sel <- mx < 5
+# creates list of names less than 5%
+sel_names <- names(sel[sel]) 
+
+# create a list of functions of length equal to the number of columns in the data
+
+funlist <- lapply(1:ncol(poll), function(x) symb.fun)
+
+# now set the elements of the list where we don't want to plot symbols to NULL
+
+funlist[!sel] <- list(NULL)
+
+ytks1 <- seq(0, 200, by=20)
+
+riojaPlot(poll, chron, groups=habitat,
+          yvar.name="Depth",
+          scale.percent=TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=earth,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="auto",
+          ymin=0, ymax=192,
+          ytks1=ytks1,
+          srt.xlabel=45)
+
+# age
+
+ytks2 <- seq(-69, 175, by=20)
+
+riojaPlot(poll, chron, groups=habitat,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          scale.percent=TRUE, 
+         plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=earth,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          plot.clust=TRUE,
+          plot.zones="auto",
+          col.zones="#232023",
+          ymin=-69, ymax=175,
+          ytks1=ytks2,
+          ytks2=ytks1,
+          srt.xlabel=45)
+```
+
+LKRE
+
+```{r}
+
+
+LKRE_wide <- poll_long %>% # wide for rioja
+  filter(Site == "LKRE") %>%
+  group_by(Depth) %>%
+  mutate(hund = sum(Count)) %>%
+  filter(hund >= 100) %>%
+  ungroup()%>%
+  group_by(VarName) %>%
+  mutate(max = max(Percent)) %>%
+  ungroup() %>%
+  filter(max > 0) %>% # removes taxa not in core
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Percent, values_fill=0) 
+
+poll <- LKRE_wide %>%
+  column_to_rownames(var = "Depth") %>%
+  select(-Age_BP)
+
+chron <- LKRE_wide %>%
+  select(Depth, Age_BP)
+
+# select variables with maximum value < 5%
+
+# calculate max of each column
+mx <- sapply(poll, max)
+#create a logical vector which is TRUE for taxa with max < 5
+sel <- mx < 5
+# creates list of names less than 5%
+sel_names <- names(sel[sel]) 
+
+# create a list of functions of length equal to the number of columns in the data
+
+funlist <- lapply(1:ncol(poll), function(x) symb.fun)
+
+# now set the elements of the list where we don't want to plot symbols to NULL
+
+funlist[!sel] <- list(NULL)
+
+ytks1 <- seq(0, 300, by=10)
+
+riojaPlot(poll, chron, groups=habitat,
+          yvar.name="Depth",
+          scale.percent=TRUE, 
+          plot.exag= TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=earth,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          col.zones="#232023",
+          ymin=0, ymax=295,
+          ytks1=ytks1,
+          srt.xlabel=45)
+
+ytks2 <- seq(-70, 670, by=20)
+
+riojaPlot(poll, chron, groups=habitat,
+          yvar.name="Age_BP",
+          sec.yvar.name="Depth",
+          plot.sec.axis=TRUE,
+          scale.percent=TRUE, 
+          plot.exag= TRUE,
+          plot.poly=!sel,
+   plot.bar = !sel,
+   plot.line=FALSE,
+   plot.exag=TRUE,
+   cex.xlabel=0.7,
+   fun.xfront=funlist,
+          plot.groups=TRUE,
+          plot.cumul=TRUE,
+          col.group=earth,
+          clust.data.trans="sqrt",
+          do.clust=TRUE,
+          col.zones="#232023",
+   ymin=-69, ymax=670,
+          ytks1=ytks2,
+          ytks2=ytks1,
+          srt.xlabel=45)
+
+```
+

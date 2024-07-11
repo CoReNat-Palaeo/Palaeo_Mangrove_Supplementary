@@ -1,0 +1,585 @@
+---
+title: "CoReNat_Ordinations_June_2023"
+author: "Rachael Holmes"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Ordination of mangrove palaeoecology data
+
+First load libraries
+
+```{r, warning=FALSE}
+
+library(tidyverse)
+library(vegan)
+library(readxl) # read excel files
+library(tidymodels)
+library(gridExtra)
+library(RColorBrewer)
+library(ggrepel)
+```
+
+Load in & setup data
+
+```{r, warning=FALSE}
+
+allpoll_list <- rio::import_list("cores_dates.xlsx")
+
+allpoll_nested <- tibble(Site=names(allpoll_list), polldata=allpoll_list)
+
+gp_lookup <- read_csv("Groups.csv")
+
+fun_long_tidy <- function(x) {
+  
+  x_long <- x %>% 
+    pivot_longer(cols=-c("Depth","Age_BP"), 
+                 names_to="VarName", 
+                 values_to="Count")%>%
+    replace(is.na(.), 0) %>%
+    group_by(Depth) %>%
+  filter(sum(Count) > 100) %>% # removes samples with counts under 100
+  ungroup() %>%
+    group_by(VarName) %>%
+    filter(sum(Count) != 0)%>%
+    ungroup()%>%
+    group_by(Depth) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>% # calculate %
+  ungroup()
+}
+
+# can use nested or in long format
+
+poll_long <- allpoll_nested %>% 
+  mutate(polldata, polldata = map(polldata, ~ fun_long_tidy(.x))) %>%
+  unnest(cols = polldata)
+
+head(poll_long)
+
+# create a wide format
+
+fun_wide_count <- function (x) {
+  
+x_count <- x  %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Count, values_fill=0) %>%
+  column_to_rownames(var = "Depth") %>%
+  select(-Age_BP) 
+}
+
+fun_wide_perc <- function (x) {
+  
+x_perc <- x  %>%
+  pivot_wider(id_cols=c(Depth, Age_BP), 
+  names_from = VarName, values_from = Percent, values_fill=0) %>%
+  column_to_rownames(var = "Depth") %>%
+  select(-Age_BP) 
+}
+
+MH_wide_perc <- poll_long %>% # wide for rioja
+  filter(Site == "MH") %>%
+  fun_wide_perc()
+
+LKN_wide_perc <- poll_long %>% # wide for rioja
+  filter(Site == "LKN") %>%
+  fun_wide_perc()
+
+LKRE_wide_perc <- poll_long %>% # wide for rioja
+  filter(Site == "LKRE") %>%
+  fun_wide_perc()
+
+
+```
+
+### Perform PCA on MH
+
+No need to transform data as it is all as relative abundance and the same units. Did try other forms of normalizing the distributions including, log and sqrt but this explained less variance and patterns were less clear.
+
+```{r, warning = FALSE}
+
+MH_PCA <- rda(MH_wide_perc)
+
+summary(MH_PCA)
+
+screeplot(MH_PCA)
+
+## Plot in GGplot
+
+PCA_tidy_sp <- function (x) {
+  
+  PCA_scor <- scores(x)
+  PCA_sp <- PCA_scor$species %>%
+  as_tibble(rownames="Species") %>%
+  left_join(gp_lookup, by = c('Species'='VarName')) %>%
+  select(Species, PC1, PC2, habitat2, zone_MH, zone_no)%>%
+    mutate(Sp_abv = abbreviate(Species, minlength = 6))
+}
+
+MH_PCA_sp <- PCA_tidy_sp(MH_PCA)
+
+Loadings_sub <- function (x) {
+  
+  PC1_max <- x %>%
+    slice_max(PC1, n = 2)
+  PC1_min <- x %>%
+    slice_min(PC1,n = 5)
+  PC2_max <- x %>%
+    slice_max(PC2,n = 3)
+   PC2_min <- x %>%
+    slice_min(PC2,n = 3)
+   PC_sub <- PC1_max %>%
+     full_join(PC1_min)%>%
+     full_join(PC2_max)%>%
+     full_join(PC2_min)%>%
+     group_by(Species)%>%
+     slice_head()
+}
+
+Loadings_sub2 <- function (x) {
+  
+   PC_sub <- x %>%
+     filter(Species == "Rubiaceae T188" | Species == "Lumnitzera racemosa" | Species == "Cyperaceae" | Species == "Arecaceae T7" | Species == "Rhizophora")
+}
+
+
+MH_PCA_sp_sub <-  MH_PCA_sp %>%
+  Loadings_sub()
+
+PCA_tidy_dep <- function (x) {
+  
+  PCA_scor <- scores(x)
+  PCA_dp <- PCA_scor$sites %>%
+  as_tibble(rownames="Depth")%>%
+  mutate(Depth = as.numeric(Depth))%>%
+  mutate(Time_bin = case_when(Depth < 30 ~ '2b',
+  Depth < 63 ~ '2a',
+  Depth < 510 ~ '1c',
+  Depth < 550 ~ '1b',
+  Depth < 610 ~ '1a'))%>%
+  mutate(Time_bin = factor(Time_bin, levels = c('1a','1b', '1c', '2a','2b')))
+}
+
+MH_PCA_dp <- PCA_tidy_dep(MH_PCA)
+
+# plotting subset of the loadings
+
+MH_PCA_dp %>%
+  ggplot( ) +
+  geom_hline(yintercept=0, linetype="dashed", alpha=0.2)+
+  geom_vline(xintercept=0, linetype="dashed", alpha=0.2)+
+  geom_path(aes (x = PC1, y = PC2, alpha = -Depth), colour = "#52307c") +
+    geom_point(aes (x = PC1, y = PC2, colour = Time_bin), size = 3, shape = 15)+
+  scale_colour_brewer(palette = "Purples")+
+   geom_text_repel(aes(x = PC1, y = PC2), 
+            label = MH_PCA_dp$Depth, size = 3)+
+  geom_segment(data = MH_PCA_sp_sub, aes(x=0, y=0, xend=PC1, yend=PC2), arrow=arrow(length=unit(0.2,"cm")), alpha=0.3)+
+  geom_text_repel(data = MH_PCA_sp_sub, aes(x = PC1, y = PC2), 
+            label = MH_PCA_sp_sub$Species, size = 3)+
+  ylab("PC2 (8.26%) ") + 
+  xlab("PC1 (79.91%) ") + 
+  theme_classic()+
+  theme(legend.position="none")
+
+```
+
+PC1 explains 79.9% of the variance in the MH pollen data. PC1 is mostly driven by the presence of Rhizophora dominated assemblages and to a lesser extent the presence of Brugiera/Ceriops. The early Holocene mangroves were less Rhizophora dominated than those of the mid-Holocene. Following the major disturbance event from the 1400s (63-61cm), Rhizophora was not an important component of the pollen assemblages until the late Holocene when the partially recovered mangrove becomes more taxonomically similiar with mangroves preceding the disturbance.
+
+PC2 explains 8.26% of the variance so combined both PC explain 88.17% of the total variance. PC2 sits along a disturbance-recovery gradient. Positive PC values are associated with the post-disturbance vegetation around the lagoon which is dominated by non-mangrove taxa such as Cyperaceae. Negative PC values are associated with Lumnitzera and to a lesser extent Nypa and Brugeira/Ceriops and are indicative of a mangrove recovery phase following the disturbance.
+
+520 and 540 cm stand out amongst the early and mid-Holocene assemblages as more similar to the disturbance vegetation present in the Late Holocene. This could imply a similarity in the response of the mangrove vegetation to the 8.2kyr event or that these disturbances more closely track changes in local relative sea-level.
+
+### PCA for mangrove taxa only
+
+```{r}
+
+fun_mangroves <- function(x) {
+  x_long <- x %>% 
+    pivot_longer(cols=-c("Depth","Age_BP"), names_to="VarName", values_to="Count")%>%
+    replace(is.na(.), 0) %>%
+    left_join(gp_lookup, by = join_by("VarName"))%>%
+    group_by(Depth) %>%
+    mutate(Total = sum(Count)) %>%
+  filter(Total > 100) %>% # removes samples with counts under 100
+  ungroup()%>%
+      arrange(zone_no, Family, VarName) %>%
+  filter(hab_no <= 1) %>%
+    group_by(Depth) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>% # calculate %
+  ungroup() %>%
+   select(-Order, -Count, -TNumber, -Group, -zone_LK, -ref, -Family, -Pollen_type2, -Lifeform,  -habitat, -habitat2, -hab_no)
+}
+
+poll_mang <- allpoll_nested %>% 
+  mutate(polldata, polldata = map(polldata, ~ fun_mangroves(.x))) %>%
+  unnest(cols = polldata)
+
+head(poll_mang)
+
+MH_mang_perc <- poll_mang %>% # wide for rioja
+  filter(Site == "MH") %>%
+  fun_wide_perc()
+
+MH_mang_PCA <- rda(MH_mang_perc)
+
+summary(MH_mang_PCA )
+
+screeplot(MH_mang_PCA)
+
+## Plot in GGplot
+
+MH_PCA_mang_sp <- PCA_tidy_sp(MH_mang_PCA)
+
+MH_PCA_mang_sp_sub <-  MH_PCA_mang_sp %>%
+  Loadings_sub()
+
+MH_PCA_mang_dp <- PCA_tidy_dep(MH_mang_PCA)
+
+# plotting subset of the loadings
+
+MH_PCA_mang_dp %>%
+  ggplot( ) +
+  geom_hline(yintercept=0, linetype="dashed", alpha=0.2)+
+  geom_vline(xintercept=0, linetype="dashed", alpha=0.2)+
+  geom_path(aes (x = PC1, y = PC2, alpha = -Depth), colour = "#52307c") +
+    geom_point(aes (x = PC1, y = PC2, colour = Time_bin), size = 3, shape = 15)+
+  scale_colour_brewer(palette = "Purples")+
+  geom_text_repel(aes(x = PC1, y = PC2), 
+            label = MH_PCA_dp$Depth, size = 3)+
+  geom_segment(data = MH_PCA_mang_sp_sub, aes(x=0, y=0, xend=PC1, yend=PC2), arrow=arrow(length=unit(0.2,"cm")), alpha=0.3)+
+  geom_text_repel(data = MH_PCA_mang_sp_sub, aes(x = PC1, y = PC2), label = MH_PCA_mang_sp_sub$Species, size = 3, max.overlaps = 30)+
+  ylab("PC2 (6.9%) ") + 
+  xlab("PC1 (84.94%) ") + 
+  theme_classic()+
+  theme(legend.position="none")
+
+
+```
+
+PC1 explains 84.94% of the variation in the mangrove pollen data from MH.
+Again, the dominance of Rhizophora vs Lumnitzera racemosa is a key driver of variance between the assemblages.
+
+PC2 explains 6.9% of the variance. PC2 explains variance along a mangrove zonation gradient from mangrove taxa with either a mixed preference or a preference for the landward zone i.e., Brugeira/Ceriops and to a lesser extent by Sciphiphora hydrophylacea, Pandanus, and Xylocarpus; or those with preference for estuarine habitat i.e., Lumnitzera racemosa, Avicennia and Nypa as well as Rhizophora which can occur locally in all mangrove zones.
+
+
+### PCA for LKN
+
+
+```{r, warning = FALSE}
+
+LKN_PCA <- rda(LKN_wide_perc)
+
+summary(LKN_PCA)
+
+screeplot(LKN_PCA)
+
+## Plot in GGplot
+
+LKN_PCA_sp <- PCA_tidy_sp(LKN_PCA)
+
+LKN_PCA_sp_sub <-  LKN_PCA_sp %>%
+  Loadings_sub()
+
+####
+
+PCA_tidy_dep <- function (x) {
+  
+  PCA_scor <- scores(x)
+  PCA_dp <- PCA_scor$sites %>%
+  as_tibble(rownames="Depth")%>%
+  mutate(Depth = as.numeric(Depth))
+}
+
+LKN_PCA_dp <- PCA_tidy_dep(LKN_PCA)
+
+# plotting subset of the loadings
+
+LKN_PCA_dp %>%
+  ggplot( ) +
+  geom_hline(yintercept=0, linetype="dashed", alpha=0.2)+
+  geom_vline(xintercept=0, linetype="dashed", alpha=0.2)+
+  geom_path(aes (x = PC1, y = PC2, alpha = -Depth), colour = "#52307c") +
+    geom_point(aes (x = PC1, y = PC2), size = 3, shape = 15, colour = "#52307c")+
+  geom_text_repel(aes (x = PC1, y = PC2), label = LKN_PCA_dp$Depth)+
+  geom_segment(data = LKN_PCA_sp_sub, aes(x=0, y=0, xend=PC1, yend=PC2), arrow=arrow(length=unit(0.2,"cm")), alpha=0.3)+
+  geom_text_repel(data = LKN_PCA_sp_sub, aes(x = PC1, y = PC2), 
+            label = LKN_PCA_sp_sub$Species, size = 3)+
+  ylab("PC2 (18.47%) ") + 
+  xlab("PC1 (46.15%) ") + 
+  theme_classic()+
+  theme(legend.position="none")
+
+```
+
+PC1 explains 46.15% of the variance in the LKN pollen data. PC1 is negatively associated with the abundance of Rhizophora and to a lesser extent Brugeira/Ceriops and positively with the abundance of psilate Polypodiaceae spores and Oncosperma. This likely reflects.....
+
+PC2 exaplains18.47% of the variance in the pollen data. PC2 is also positively associated with psilate Polypodiaceae spores and to a lesser extent Nypa. PC2 is negatively associated with non-mangrove and open/disturbance taxa such as Rubiaceae Type 188, Macaranga/Mallotus, 	
+Elaeocarpus and Acalypha.
+
+### LKN Mangrove Pollen
+
+```{r}
+
+LKN_mang_perc <- poll_mang %>% # wide for rioja
+  filter(Site == "LKN") %>%
+  fun_wide_perc()
+
+LKN_mang_PCA <- rda(LKN_mang_perc)
+
+summary(LKN_mang_PCA )
+
+screeplot(LKN_mang_PCA)
+
+## Plot in GGplot
+
+LKN_PCA_mang_sp <- PCA_tidy_sp(LKN_mang_PCA)
+
+LKN_PCA_mang_sp_sub <-  LKN_PCA_mang_sp %>%
+  Loadings_sub()
+
+LKN_PCA_mang_dp <- PCA_tidy_dep(LKN_mang_PCA)
+
+# plotting subset of the loadings
+
+LKN_PCA_mang_dp %>%
+  ggplot( ) +
+  geom_hline(yintercept=0, linetype="dashed", alpha=0.2)+
+  geom_vline(xintercept=0, linetype="dashed", alpha=0.2)+
+  geom_path(aes (x = PC1, y = PC2, alpha = -Depth), colour = "#52307c") +
+    geom_point(aes (x = PC1, y = PC2), size = 3, shape = 15)+
+  geom_segment(data = LKN_PCA_mang_sp_sub, aes(x=0, y=0, xend=PC1, yend=PC2), arrow=arrow(length=unit(0.2,"cm")), alpha=0.3)+
+  geom_text_repel(data = LKN_PCA_mang_sp_sub, aes(x = PC1, y = PC2), label = LKN_PCA_mang_sp_sub$Species, size = 3, max.overlaps = 30)+
+  ylab("PC2 (20.81%) ") + 
+  xlab("PC1 (64.31%) ") + 
+  theme_classic()+
+  theme(legend.position="none")
+```
+
+PC1 explains 64.31% of variance in the data. PC1 is negatively associated with presence of Rhizophora and positively associated with Oncosperma, Nypa and Calamus.
+
+PC2 explains 20.81% of the mangrove pollen data. It is positively associated with the presence of Brugeira/Ceriops and negatively with Rhizophora and to a lesser extent Nypa.
+
+### PCA LKRE (shrimp pond/mixed fill removed)
+
+```{r, warning = FALSE}
+
+LKRE_sub <- poll_long %>% # wide for rioja
+  filter(Site == "LKRE") %>%
+  filter(Depth < 5 | Depth > 70)%>%
+  fun_wide_perc()
+
+LKRE_PCA2 <- rda(LKRE_sub)
+
+summary(LKRE_PCA2)
+
+screeplot(LKRE_PCA2)
+
+## Plot in GGplot
+
+LKRE_PCA_sp <- PCA_tidy_sp(LKRE_PCA2)
+
+LKRE_PCA_sp_sub <-  LKRE_PCA_sp %>%
+  Loadings_sub()
+
+####
+
+LKRE_PCA_dp <- PCA_tidy_dep(LKRE_PCA2)
+
+# plotting subset of the loadings
+
+LKRE_PCA_dp %>%
+  ggplot( ) +
+  geom_hline(yintercept=0, linetype="dashed", alpha=0.2)+
+  geom_vline(xintercept=0, linetype="dashed", alpha=0.2)+
+  geom_path(aes (x = PC1, y = PC2, alpha = -Depth), colour = "#52307c") +
+    geom_point(aes (x = PC1, y = PC2), size = 3, shape = 15, colour = "#52307c")+
+  geom_text_repel(aes (x = PC1, y = PC2), label = LKRE_PCA_dp$Depth)+
+  geom_segment(data = LKRE_PCA_sp_sub, aes(x=0, y=0, xend=PC1, yend=PC2), arrow=arrow(length=unit(0.2,"cm")), alpha=0.3)+
+  geom_text_repel(data = LKRE_PCA_sp_sub, aes(x = PC1, y = PC2), 
+            label = LKRE_PCA_sp_sub$Species, size = 3)+
+  ylab("PC2 (11.05%) ") + 
+  xlab("PC1 (72.73%) ") + 
+  theme_classic()+
+  theme(legend.position="none")
+
+```
+Here PC1 explains 72.73% of the variance. PC1 is still determined by the dominance of Rhizophora. PC2 explains 11.05% of the variance and is negatively associated with presence of Brugeira/Ceriops.
+
+```{r}
+LKRE_mang_sub <- poll_mang %>% # wide for rioja
+  filter(Site == "LKRE") %>%
+  filter(Depth < 5 | Depth > 70)%>%
+  fun_wide_perc()
+
+LKRE_mang_PCA <- rda(LKRE_mang_sub)
+
+summary(LKRE_mang_PCA )
+
+screeplot(LKRE_mang_PCA)
+
+## Plot in GGplot
+
+LKRE_PCA_mang_sp <- PCA_tidy_sp(LKRE_mang_PCA)
+
+LKRE_PCA_mang_sp_sub <-  LKRE_PCA_mang_sp %>%
+  Loadings_sub()
+
+LKRE_PCA_mang_dp <- PCA_tidy_dep(LKRE_mang_PCA)
+
+# plotting subset of the loadings
+
+LKRE_PCA_mang_dp %>%
+  ggplot( ) +
+  geom_hline(yintercept=0, linetype="dashed", alpha=0.2)+
+  geom_vline(xintercept=0, linetype="dashed", alpha=0.2)+
+  geom_path(aes (x = PC1, y = PC2, alpha = -Depth), colour = "#52307c") +
+    geom_point(aes (x = PC1, y = PC2), size = 3, shape = 15)+
+  geom_text_repel(aes (x = PC1, y = PC2), label = LKRE_PCA_mang_dp$Depth)+
+  geom_segment(data = LKRE_PCA_mang_sp_sub, aes(x=0, y=0, xend=PC1, yend=PC2), arrow=arrow(length=unit(0.2,"cm")), alpha=0.3)+
+  geom_text_repel(data = LKRE_PCA_mang_sp_sub, aes(x = PC1, y = PC2), label = LKRE_PCA_mang_sp_sub$Species, size = 3, max.overlaps = 30)+
+  ylab("PC2 (14.49%) ") + 
+  xlab("PC1 (79.74%) ") + 
+  theme_classic()+
+  theme(legend.position="none")
+```
+
+PC1 explains 79.74% variance of the mangrove pollen data for LKRE. PC1 is most related to the presence of Rhizophora or to a lesser degree the presence of Nypa.PC2 which explains 14.49% of the data and is again driven mostly by the presence of Brugeira/Ceriops and Scyphiphora and conversely by the presence of Nypa.
+
+### LKN and LKRE same PCA
+
+```{r, warning = FALSE}
+
+## First make new table with both sites
+
+Likupang_all <- poll_long %>% # wide for rioja
+  mutate(Sample = paste(Site, Depth, sep = '_'))%>%
+  filter(Site == "LKN" | Site == "LKRE") %>%
+  pivot_wider(id_cols=c(Sample, Depth, Age_BP), 
+  names_from = VarName, values_from = Percent, values_fill=0) 
+
+
+Likupang <- Likupang_all %>%
+  column_to_rownames(var = "Sample") %>%
+  select(-Depth, -Age_BP)
+
+chron <- Likupang_all %>%
+  select(Sample, Depth, Age_BP)%>%
+  mutate(Core = Sample %>% str_detect("LKN") %>% if_else("LKN", "LKRE")) %>%
+  mutate(Core = factor(Core, levels = c('LKN','LKRE')))
+
+LK_PCA <- rda(Likupang)
+
+summary(LK_PCA)
+
+screeplot(LK_PCA)
+
+## Plot in GGplot
+
+LK_PCA_sp <- PCA_tidy_sp(LK_PCA)
+
+LK_PCA_sp_sub <-  LK_PCA_sp %>%
+  Loadings_sub()
+
+####
+
+PCA_tidy_dep2 <- function (x) {
+  
+  PCA_scor <- scores(x)
+  PCA_dpLKN <- PCA_scor$sites %>%
+  as_tibble(rownames="Sample")%>%
+    left_join(chron)%>%
+    filter(Core == "LKN")%>%
+    mutate(Depth = as.numeric(Depth))%>%
+  mutate(Zone = case_when(
+  Depth < 10 ~ 'LKN2c',
+  Depth < 16 ~ 'LKN2b',
+  Depth < 70 ~ 'LKN2a',
+  Depth < 193 ~ 'LKN1'))
+  
+  PCA_dpLKRE <- PCA_scor$sites %>%
+  as_tibble(rownames="Sample")%>%
+    left_join(chron)%>%
+    filter(Core == "LKRE")%>%
+    mutate(Depth = as.numeric(Depth))%>%
+  mutate(Zone = case_when(
+  Depth == 0 ~ 'LKRE4',
+  Depth < 180 ~ 'LKRE3',
+  Depth < 230 ~ 'LKRE2',
+  Depth <= 300 ~ 'LKRE1'))
+  
+  PCA_dp <- PCA_dpLKN %>%
+    full_join(PCA_dpLKRE) %>%
+  mutate(Zone = factor(Zone, levels = c('LKN1','LKN2a', 'LKN2b', 'LKN2c', 
+                                        'LKRE1','LKRE2', 'LKRE3', 'LKRE4')))
+}
+
+LK_PCA_dp <- PCA_tidy_dep2(LK_PCA)
+
+# plotting subset of the loadings
+
+LK_PCA_dp %>%
+  ggplot( ) +
+  geom_hline(yintercept=0, linetype="dashed", alpha=0.2)+
+  geom_vline(xintercept=0, linetype="dashed", alpha=0.2)+
+  #geom_path(aes (x = PC1, y = PC2, alpha = -Depth), colour = "#52307c") +
+    geom_point(aes (x = PC1, y = PC2, col = Core, alpha = -Depth), size = 3, shape = 15)+
+  geom_text_repel(aes (x = PC1, y = PC2), label = LK_PCA_dp$Sample)+
+  geom_segment(data = LK_PCA_sp_sub, aes(x=0, y=0, xend=PC1, yend=PC2), arrow=arrow(length=unit(0.2,"cm")), alpha=0.3)+
+  geom_text_repel(data = LK_PCA_sp_sub, aes(x = PC1, y = PC2), 
+            label = LK_PCA_sp_sub$Species, size = 3)+
+  ylab("PC2 (7.27%) ") + 
+  xlab("PC1 (73.83.15%) ") + 
+  theme_classic()+
+  theme(legend.position="none")
+
+```
+
+
+### Likupang Mangrove Pollen
+
+```{r}
+
+
+Likupang_mang_perc <- poll_mang %>% # wide for rioja
+  mutate(Sample = paste(Site, Depth, sep = '_'))%>%
+  filter(Site == "LKN" | Site == "LKRE") %>%
+  pivot_wider(id_cols=c(Sample), 
+  names_from = VarName, values_from = Percent, values_fill=0) %>%
+  column_to_rownames(var = "Sample")
+
+LK_mang_PCA <- rda(Likupang_mang_perc)
+
+summary(LK_mang_PCA )
+
+screeplot(LK_mang_PCA)
+
+## Plot in GGplot
+
+LK_PCA_mang_sp <- PCA_tidy_sp(LK_mang_PCA)
+
+LK_PCA_mang_sp_sub <-  LK_PCA_mang_sp %>%
+  Loadings_sub()
+
+LK_PCA_mang_dp <- PCA_tidy_dep2(LK_mang_PCA)
+
+# plotting subset of the loadings
+
+group.colors <- c(LKN = "#016698", LKRE = "#F37056")
+
+LK_PCA_mang_dp %>%
+  ggplot( ) +
+  geom_hline(yintercept=0, linetype="dashed", alpha=0.2)+
+  geom_vline(xintercept=0, linetype="dashed", alpha=0.2)+
+  #geom_path(aes (x = PC1, y = PC2, alpha = -Depth), colour = "#52307c") +
+    geom_point(aes (x = PC1, y = PC2, col = Core, alpha = -Depth), size = 3, shape = 15)+
+  geom_text_repel(aes (x = PC1, y = PC2), label = LK_PCA_mang_dp$Sample)+
+  geom_segment(data = LK_PCA_mang_sp_sub, aes(x=0, y=0, xend=PC1, yend=PC2), arrow=arrow(length=unit(0.2,"cm")), alpha=0.3)+
+  geom_text_repel(data = LK_PCA_mang_sp_sub, aes(x = PC1, y = PC2), 
+            label = LK_PCA_mang_sp_sub$Species, size = 3)+
+  ylab("PC2 (17.31%) ") + 
+  xlab("PC1 (70.22%) ") + 
+  theme_classic()+
+  theme(legend.position="right")
+```
+
